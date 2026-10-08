@@ -1,0 +1,6 @@
+# Parakeet Live widget venv (Windows Python 3.14), official PyPI only, exact pins. Install: venv\Scripts\python.exe -m pip install -r requirements.txt
+cffi==2.1.1
+numpy==2.5.3
+pillow==12.3.0
+pycparser==3.0
+sounddevice==0.5.6

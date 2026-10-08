@@ -1,0 +1,21 @@
+# Default: normalize text to LF in the repo; check out with the platform default.
+* text=auto
+# PowerShell / batch / VBScript: always CRLF on disk. The UTF-8 BOM on .ps1 files is ordinary file content to git
+# and is kept byte-for-byte (PowerShell 5.1 reads BOM-less files as ANSI: the em-dash trap). Keep them ASCII.
+*.ps1 text eol=crlf
+*.psm1 text eol=crlf
+*.vbs text eol=crlf
+*.bat text eol=crlf
+*.cmd text eol=crlf
+# Shell and Python that run inside WSL: LF on disk too.
+*.sh text eol=lf
+*.py text eol=lf
+*.pyw text eol=lf
+# Binary
+*.ico binary
+*.png binary
+*.jpg binary
+*.mp3 binary
+*.wav binary
+*.rar binary
+*.zip binary
