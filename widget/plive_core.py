@@ -228,6 +228,17 @@ class ServerProcess:
         return gone
 
 
+def boot_time():
+    """Wall-clock time (epoch s) of the current Windows boot, or None (not Windows / unknown)."""
+    try:
+        import ctypes
+        f = ctypes.windll.kernel32.GetTickCount64
+        f.restype = ctypes.c_ulonglong
+        return time.time() - f() / 1000.0
+    except Exception:
+        return None
+
+
 class ServerRecord:
     """keep-server (2026-10-09): what the next widget run needs to reconnect to the model server this one
     leaves running - port, per-server secret, Linux pid and start time. Lives in the locked state folder
@@ -252,6 +263,17 @@ class ServerRecord:
 
     def clear(self):
         SessionStore._rm(self.path)
+
+    @staticmethod
+    def saved_before_boot(rec, boot=None):
+        """staleskip (2026-10-09): a record written before this Windows boot points at a server that died
+        with the old session; skip the 2 s health timeout and cold-start at once. Unknown -> False (try)."""
+        try:
+            if boot is None:
+                boot = boot_time()
+            return boot is not None and float(rec.get("saved")) < boot
+        except (TypeError, ValueError):
+            return False
 
     @staticmethod
     def matches(rec, health):

@@ -1882,6 +1882,9 @@ class App:
         if not rec:
             return False
         self.srv_rec.clear()                 # one use; rewritten once the server answers again
+        if core.ServerRecord.saved_before_boot(rec):
+            log("keep-server: reconnect record is from before this Windows boot; cold start at once")
+            return False
         why, h = "", None
         try:
             h = core.Client(int(rec["port"]), token=rec["token"]).health(timeout=2.0)

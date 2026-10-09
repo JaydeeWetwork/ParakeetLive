@@ -141,6 +141,8 @@ All commands run in PowerShell. Steps 4-6 run from the repo folder.
   id and start time) and is ready in a second or two instead of a ~20 s load. Nobody reconnecting = it
   exits by itself after 90 s. **Quit (stop model too)** (tray and gear menu, `--cmd quitall`) stops it
   right away. The secret lives in the private state folder, never in git or the logs.
+  A reconnect record saved before the current Windows boot is skipped (that server died with the old
+  session), so the first start after a reboot cold-loads at once instead of waiting ~2 s for an answer.
   While no widget is running, auto-park still works: the quitting widget starts a small hidden helper
   (up to 95 s) that uses the same park list and policy; a game starting stops the kept server (VRAM
   freed within about one poll). A batch job's GPU hold stops it too. A parked widget never keeps it.
