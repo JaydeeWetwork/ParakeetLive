@@ -30,7 +30,8 @@ TPM_RIGHTBUTTON, TPM_RETURNCMD, TPM_NONOTIFY = 0x2, 0x100, 0x80
 IMAGE_ICON, LR_LOADFROMFILE = 1, 0x10
 
 IPC_CODES = {"show": 1, "hide": 2, "toggle": 3, "load": 4, "unload": 5, "record": 6, "quit": 7, "dump": 8,
-             "prewarm": 9, "standby": 10, "pausepark": 11, "silentrec": 12, "batchhold": 13, "batchrelease": 14}
+             "prewarm": 9, "standby": 10, "pausepark": 11, "silentrec": 12, "batchhold": 13, "batchrelease": 14,
+             "quitall": 15}
 IPC_NAMES = {v: k for k, v in IPC_CODES.items()}
 
 

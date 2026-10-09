@@ -136,13 +136,18 @@ All commands run in PowerShell. Steps 4-6 run from the repo folder.
 - Speak, pause, and the text appears. Paste it wherever you want (it is already on the clipboard).
 - **Top bar:** copy all, clear, gear (settings), minimize and X. Minimize, X and **Esc** hide the
   widget to the tray (the model stays loaded). **Quit** is in the tray menu.
+  **Quit keeps the model server for a quick restart** (2026-10-09): a plain Quit leaves a loaded model
+  server running, and the next widget start reconnects to it (checked by its per-server secret, process
+  id and start time) and is ready in a second or two instead of a ~20 s load. Nobody reconnecting = it
+  exits by itself after 90 s. **Quit (stop model too)** (tray and gear menu, `--cmd quitall`) stops it
+  right away. The secret lives in the private state folder, never in git or the logs.
 - **Tray icon:** left-click shows or hides the widget. Right-click for recording, model loading and
   unloading, pause auto-park, save training data, settings and quit. New tray icons often land in the
   ^ overflow; drag it onto the taskbar to keep it visible.
 - Drag the widget by its frame or the round button; resize it with the grip in the bottom-right
   corner. Position, size, microphone and settings are remembered.
 - **Command line** (talks to the running copy):
-  `pythonw parakeet_live.pyw --cmd show|hide|toggle|load|unload|record|prewarm|standby|pausepark|quit`
+  `pythonw parakeet_live.pyw --cmd show|hide|toggle|load|unload|record|prewarm|standby|pausepark|quit|quitall`
 
 ### Batch transcription
 

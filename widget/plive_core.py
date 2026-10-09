@@ -157,6 +157,14 @@ class ServerProcess:
         self.mode, self.low_priority = mode, low_priority
         self.proc = None
         self.logf = None
+        self.adopted = False      # started by an earlier widget run and reconnected to (keep-server, 2026-10-09)
+
+    @classmethod
+    def adopt(cls, port, log_path, token, mode="gpu"):
+        """A server an earlier widget left running: no process handle here; /health decides if it lives."""
+        s = cls(port, log_path, mode=mode, token=token)
+        s.adopted = True
+        return s
 
     def start(self):
         os.makedirs(os.path.dirname(self.log_path), exist_ok=True)
@@ -188,6 +196,8 @@ class ServerProcess:
             raise
 
     def alive(self):
+        if self.adopted:
+            return True           # no handle to poll: the health checks (3 misses = gone) decide
         return self.proc is not None and self.proc.poll() is None
 
     def stop(self, client=None, wait=8.0):
@@ -216,6 +226,42 @@ class ServerProcess:
             except Exception:
                 pass
         return gone
+
+
+class ServerRecord:
+    """keep-server (2026-10-09): what the next widget run needs to reconnect to the model server this one
+    leaves running - port, per-server secret, Linux pid and start time. Lives in the locked state folder
+    (never in the repo, never logged). One use: the reader removes it; a new one is written once the
+    (re)connected or newly started server answers."""
+
+    def __init__(self, state_dir):
+        self.path = os.path.join(os.path.abspath(state_dir), "server.json")
+
+    def save(self, port, token, health):
+        d = {"v": 1, "port": int(port), "token": token, "pid": health.get("pid"),
+             "started": health.get("started"), "saved": time.time()}
+        return SessionStore._atomic(self.path, json.dumps(d).encode("utf-8"))
+
+    def load(self):
+        try:
+            with open(self.path, encoding="utf-8") as f:
+                d = json.load(f)
+            return d if d.get("v") == 1 and d.get("token") and d.get("port") else None
+        except Exception:
+            return None
+
+    def clear(self):
+        SessionStore._rm(self.path)
+
+    @staticmethod
+    def matches(rec, health):
+        """Same server process (pid + start time), and in a state we can take over."""
+        try:
+            return (health.get("pid") == rec.get("pid")
+                    and abs(float(health.get("started")) - float(rec.get("started"))) < 1.0
+                    and health.get("status") in ("ready", "standby"))
+        except (TypeError, ValueError):
+            return False
 
 
 # --------------------------------------------------------------------------- audio

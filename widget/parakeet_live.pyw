@@ -135,6 +135,7 @@ RETRY_MAX_AGE_S = 3600                         # a failed utterance is retried f
 
 # tray menu command ids
 T_SHOWHIDE, T_RECORD, T_MODEL, T_SAVE, T_SETTINGS, T_AUTOCOPY, T_QUIT = 1, 2, 3, 4, 5, 6, 9
+T_QUITALL = 8
 T_IDLE0 = 20
 T_UNLOAD, T_RAMSTBY, T_PREWARM = 10, 11, 12
 T_STBY0 = 40
@@ -426,6 +427,9 @@ class App:
         self._retry_kid = {}            # utterance id of a re-queued kept utterance -> (file id, failed_at) (log 57)
         sd = session_dir(args)
         self.store = core.SessionStore(sd) if sd else None     # unsent message + kept retries (log 57)
+        self.srv_rec = core.ServerRecord(sd) if sd else None   # keep-server: reconnect after a widget restart
+        self.server_adopted = False
+        self._quit_stop_server = True
         self._draft_job = None
         self._recover_times = []        # automatic engine restarts (GPU policy), for the rate limit
         self._quitting = False
@@ -451,6 +455,7 @@ class App:
         self.root.after(5000, self._idle_check)
         self.set_state("unloaded", "Model not loaded - click the mic to start")
         self._restore_session()
+        self._try_adopt()                    # keep-server: a widget restart reuses the running model server
         if not args.tray:
             self.root.after(50, self.show)
         elif self.cfg["prewarm_login"]:
@@ -660,6 +665,7 @@ class App:
         m.add_separator()
         m.add_command(label="Hide to tray", command=self.hide)
         m.add_command(label="Quit Parakeet Live", command=self.quit)
+        m.add_command(label="Quit (stop model too)", command=lambda: self.quit(stop_server=True))
 
     def _open(self, path, folder=False):
         try:
@@ -754,6 +760,7 @@ class App:
             ]),
             None,
             (T_QUIT, "Quit Parakeet Live", 0),
+            (T_QUITALL, "Quit (stop model too)", 0),
         ]
 
     def _tray_event(self, ev):
@@ -781,6 +788,7 @@ class App:
          "load": self.load_model, "unload": lambda: self.unload_model("manual"),
          "prewarm": lambda: self.prewarm("manual"), "standby": lambda: self.to_standby("manual"),
          "record": self.toggle, "quit": self.quit, "dump": self.dump_state,
+         "quitall": lambda: self.quit(stop_server=True),
          "pausepark": lambda: self._set_park_paused(not self.park_paused),
          "silentrec": self._silent_record}.get(cmd, self.show)()
 
@@ -822,6 +830,8 @@ class App:
             self._set_idle(IDLE_CHOICES[cid - T_IDLE0])
         elif cid == T_QUIT:
             self.quit()
+        elif cid == T_QUITALL:
+            self.quit(stop_server=True)
 
     def _update_tray(self):
         pk = self.parked if (self.parked and not self.parked.get("temp")) else None
@@ -1191,6 +1201,7 @@ class App:
             d = {"time": time.strftime("%H:%M:%S"), "pid": os.getpid(), "engine": self.engine,
                  "visible": self.visible, "recording": self.recording, "pending": self.pending,
                  "port": self.port, "server_alive": bool(self.server and self.server.alive()),
+                 "server_adopted": self.server_adopted,
                  "tray_added": self.tray.added, "tray_rect": self.tray.icon_rect() if self.tray.hwnd else None,
                  "hotkey_ok": self.tray.hotkey_ok, "failed_kept": len(self.failed), "copy_count": self.copy_count, "copy_failures": self.copy_failures, "save_training": self.cfg["save_training"],
                  "idle_unload_min": self.cfg["idle_unload_min"], "status": self.status.cget("text"),
@@ -1860,6 +1871,49 @@ class App:
         log("loading model (cold start)")
         threading.Thread(target=self._engine_thread, args=(gen, 0, "gpu"), name="engine", daemon=True).start()
 
+    def _try_adopt(self):
+        """keep-server (2026-10-09): reconnect to the model server the previous widget run left running, so a
+        widget restart is ready in ~1-2 s instead of a ~20 s cold load. It must answer /health with the saved
+        per-server secret (a 401 or no answer = not ours), be the same process (pid + start time) and be ready
+        (GPU) or in standby (RAM). Anything else: the usual cold start, which first kills any leftover server."""
+        if self.srv_rec is None:
+            return False
+        rec = self.srv_rec.load()
+        if not rec:
+            return False
+        self.srv_rec.clear()                 # one use; rewritten once the server answers again
+        why, h = "", None
+        try:
+            h = core.Client(int(rec["port"]), token=rec["token"]).health(timeout=2.0)
+        except Exception as e:
+            why = type(e).__name__
+        if not (h and core.ServerRecord.matches(rec, h)):
+            log(f"keep-server: previous model server not reused ({why or (h or {}).get('status') or 'mismatch'}); "
+                "cold start as usual")
+            return False
+        self.port = int(rec["port"])
+        self.server_token = rec["token"]
+        self.tclient = core.Client(self.port, token=self.server_token)
+        st = h.get("status")
+        self.server = core.ServerProcess.adopt(self.port, os.path.join(LOG_DIR, "server.log"), self.server_token,
+                                               mode="gpu" if st == "ready" else "standby")
+        self.server_adopted = True
+        self.health = h
+        self.gen += 1
+        gen = self.gen
+        self.ready_evt.clear()
+        self.load_t0 = time.perf_counter()
+        if st == "ready":
+            self.want_gpu, self.engine = True, "loading"
+        else:                                # in RAM: the standby handler moves it on (GPU policy, not parked)
+            self.want_gpu, self.engine = False, "prewarming"
+            self.goal_gpu = bool(self.cfg["gpu_always"])
+        log(f"keep-server: reconnected to the running model server ({st}) on port {self.port}")
+        self._update_status()
+        threading.Thread(target=self._server_loop, args=(gen, 0, self.server.mode), name="engine",
+                         daemon=True).start()
+        return True
+
     def _login_load(self):
         """Login (2026-10-09): model straight onto the GPU at normal priority. Only while a game/batch job
         holds the GPU does it fall back to the RAM pre-load (which moves on to the GPU when it is free)."""
@@ -1897,6 +1951,11 @@ class App:
             try:
                 if core.kill_stale_servers():
                     log("killed a stale live_server.py left in WSL")
+                if self.srv_rec is not None:
+                    self.srv_rec.clear()
+                if not getattr(self.args, "server_token", None):
+                    self.server_token = secrets.token_hex(16)   # new server, new secret (keep-server)
+                self.server_adopted = False
                 port = core.pick_port(self.cfg["port"] + attempt)
                 if port != self.cfg["port"]:
                     log(f"port {self.cfg['port']} busy, using {port} this session")
@@ -1933,6 +1992,11 @@ class App:
                 self.health = h
                 st = h.get("status")
                 if st in ("standby", "activating", "ready"):
+                    if not established and self.srv_rec is not None and gen == self.gen:
+                        try:                    # keep-server: the next widget run can reconnect to this one
+                            self.srv_rec.save(self.port, self.server_token, h)
+                        except Exception as e:
+                            log(f"keep-server: could not save the server record: {type(e).__name__}")
                     established = True
                 if self.want_gpu and not activated and st in ("loading", "standby"):
                     try:
@@ -1996,6 +2060,8 @@ class App:
         def work():
             with self.engine_lock:
                 try:
+                    if self.srv_rec is not None:
+                        self.srv_rec.clear()
                     if srv is not None:
                         srv.stop(core.Client(port, token=self.server_token))
                     else:
@@ -2664,10 +2730,14 @@ class App:
             self._hold_loop = False
 
     # ------------------------------------------------------------------ quit
-    def quit(self):
+    def quit(self, stop_server=False):
+        """keep-server (2026-10-09): a plain quit leaves a loaded model server running for the next widget run
+        (it exits by itself after 90 s without a widget); stop_server (tray 'Quit (stop model too)',
+        --cmd quitall) stops it as before."""
         if self.closing or self._quitting:
             return
-        log("quitting")
+        self._quit_stop_server = bool(stop_server)
+        log("quitting" + (" (stopping the model server too)" if stop_server else ""))
         self._quitting = True
         try:
             self.stop_recording()      # flushes the last utterance into the queue
@@ -2723,6 +2793,21 @@ class App:
             try:
                 self.training.flush(5)
                 srv, port = self.server, self.port
+                keep = (not self._quit_stop_server and srv is not None and self.srv_rec is not None
+                        and self.engine in ("ready", "standby") and not self.holds
+                        and self.srv_rec.load() is not None)
+                if keep:
+                    self.stop_result = "kept"
+                    log("quit: model server left running for the next widget run (it exits by itself after "
+                        "90 s without one; tray 'Quit (stop model too)' stops it right away)")
+                    if srv.logf:
+                        try:
+                            srv.logf.close()
+                        except Exception:
+                            pass
+                    return
+                if self.srv_rec is not None:
+                    self.srv_rec.clear()
                 with self.engine_lock:
                     # never loaded this session: don't wake WSL just to quit
                     self.stop_result = (srv.stop(core.Client(port, token=self.server_token))
