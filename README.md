@@ -30,7 +30,7 @@ Tested on a few-years-old mid-range gaming laptop: Windows 11, NVIDIA RTX 3050 T
 - **Batch transcription** of long files via PowerShell; it asks a running widget to move its model off
   the GPU for the duration of the job.
 - **Robust:** a failed transcription is retried and its audio kept for up to 1 hour (also across a
-  restart), the unsent message is restored after a restart, a stalled microphone is detected, and a
+  restart), a stalled microphone is detected, and a
   crashed engine restarts by itself.
 
 ## How it works
@@ -124,8 +124,8 @@ All commands run in PowerShell. Steps 4-6 run from the repo folder.
    ```
 
    Make a shortcut to that command for the Start Menu. To start it at login as a tray icon only, put a
-   shortcut with `--tray` added in your Startup folder (`shell:startup`); about 60 s after login it
-   pre-loads the model (low priority) so dictation is instant later.
+   shortcut with `--tray` added in your Startup folder (`shell:startup`); it loads the model onto the
+   GPU right away (RAM first only while a game or batch job holds the GPU), so dictation is ready soon after login.
 
 `tools/versions.sh` prints the installed versions inside WSL.
 
@@ -184,7 +184,7 @@ Most settings are in the gear menu (or tray > Settings). They are saved in `widg
 
 **Data folder:** the `PARAKEET_LIVE_DATA` environment variable, else `data_dir` in `config.json`,
 else `%LOCALAPPDATA%\ParakeetLive`. It holds `logs\` (widget.log, server.log, state.json),
-`state\` (the unsent message and audio waiting for a retry) and `training-data\`.
+`state\` (audio waiting for a retry) and `training-data\`.
 
 ## Privacy
 
@@ -196,8 +196,8 @@ else `%LOCALAPPDATA%\ParakeetLive`. It holds `logs\` (widget.log, server.log, st
   (16 kHz WAV, about 115 MB per hour of dictation) and its text go into `training-data\` in the data
   folder, in a NeMo-compatible `manifest.jsonl`, for your own fine-tuning later. The app never
   deletes these files. Turn it off in the tray or gear menu if you don't want it.
-- The unsent message is kept in `state\draft.json` so it survives a restart (not restored after
-  7 days); audio of a failed transcription is kept in `state\pending\` for up to 1 hour.
+- Every launch starts with an empty box; the box text is never written to disk. Audio of a failed
+  transcription is kept in `state\pending\` for up to 1 hour so it can be retried.
 - Auto-copy puts every version of the box on the clipboard, so Windows clipboard history (Win+V)
   may keep them. Turn off Auto-copy and use Copy all if that bothers you.
 - To detect pasting, the widget checks just the Ctrl and V key states, and only while copied text is

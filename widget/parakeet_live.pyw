@@ -90,8 +90,8 @@ DEFAULTS = {"data_dir": DEFAULT_DATA_DIR, "x": None, "y": None, "w": None, "h": 
             "save_training": True,
             "ram_standby": True,        # idle: move the model to RAM (VRAM freed) instead of unloading it
             "standby_unload_h": 4,      # ... and free the RAM after this many hours in standby (0 = never)
-            "prewarm_login": True,      # --tray (login): pre-load into RAM, low priority, after a delay
-            "prewarm_delay_s": 60,
+            "prewarm_login": True,      # --tray (login): load the model at once (GPU with gpu_always; RAM only while the GPU is busy)
+            "prewarm_delay_s": 0,
             # ---- GPU policy + auto-park (config_version 2, 2026-10-07)
             "config_version": 4,
             "gpu_always": True,         # keep the model on the GPU; login pre-load goes RAM -> GPU; no 4 h RAM unload
@@ -116,7 +116,7 @@ DEFAULTS = {"data_dir": DEFAULT_DATA_DIR, "x": None, "y": None, "w": None, "h": 
             "show_on_hotkey": True,     # hotkey that starts a recording shows the hidden widget (no focus steal)
             # ---- config_version 5 (log 57)
             "paste_detect": True}       # clear-on-return: Ctrl+V after the copy counts as "pasted" (same window)
-CONFIG_VERSION = 5
+CONFIG_VERSION = 6
 OLD_PARK_GAMES = {"javaw.exe", "minecraft.windows.exe"}   # the v4 default (log 51)
 
 SILENCE_CHOICES = [0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 1.0, 1.5]
@@ -254,7 +254,7 @@ def migrate_config():
     import shutil
     shutil.copy2(CONFIG_PATH, bak)
     before = {k: raw.get(k) for k in ("idle_unload_min", "gpu_always", "auto_park", "clear_on_return", "show_on_hotkey",
-                                      "park_games", "paste_detect")}
+                                      "park_games", "paste_detect", "prewarm_delay_s")}
     if old < 2:
         raw.update({"idle_unload_min": 0, "gpu_always": True, "auto_park": True})
     if old < 3:
@@ -266,6 +266,9 @@ def migrate_config():
         if pg is None or (isinstance(pg, list) and {str(x).lower() for x in pg} == OLD_PARK_GAMES):
             raw["park_games"] = list(DEFAULTS["park_games"])
         raw.setdefault("paste_detect", True)
+    if old < 6:                                  # 2026-10-09: load at login without the old 60 s delay
+        if raw.get("prewarm_delay_s") in (None, 60, 60.0):
+            raw["prewarm_delay_s"] = 0
     raw["config_version"] = CONFIG_VERSION
     save_config(raw)
     return f"config migrated v{old} -> v{CONFIG_VERSION} (backup {os.path.basename(bak)}): was {before}"
@@ -452,9 +455,12 @@ class App:
             self.root.after(50, self.show)
         elif self.cfg["prewarm_login"]:
             d = float(self.cfg["prewarm_delay_s"] if args.prewarm_delay is None else args.prewarm_delay)
-            then = bool(self.cfg["gpu_always"])
-            log(f"pre-load into RAM scheduled in {d:g} s" + (", then GPU" if then else ""))
-            self.root.after(int(d * 1000), lambda: self.prewarm("login pre-warm", then_gpu=then))
+            if self.cfg["gpu_always"]:       # 2026-10-09: used all day - straight onto the GPU at login
+                log(f"login: loading the model onto the GPU in {d:g} s")
+                self.root.after(int(d * 1000), self._login_load)
+            else:
+                log(f"pre-load into RAM scheduled in {d:g} s")
+                self.root.after(int(d * 1000), lambda: self.prewarm("login pre-warm"))
         self.root.after(500, self.dump_state)
         if args.selftest:
             threading.Thread(target=self._selftest, name="selftest", daemon=True).start()
@@ -1348,6 +1354,7 @@ class App:
     # ------------------------------------------------------------------ survive restarts (log 57)
     def _draft_dirty(self):
         """The box or its clear-on-return state changed: save the draft 1.5 s after the last change."""
+        return    # 2026-10-09: a new launch starts empty, so the box text is no longer written to disk
         if self.store is None or self.closing:
             return
         if self._draft_job is not None:
@@ -1356,6 +1363,7 @@ class App:
 
     def _save_draft(self):
         self._draft_job = None
+        return    # 2026-10-09: no cross-launch restore (see _restore_session)
         if self.store is None:
             return
         box = self.text.get("1.0", "end-1c")
@@ -1375,6 +1383,13 @@ class App:
         except Exception as e:
             d = None
             log(f"draft not restored: {e.__class__.__name__}")
+        if d:     # 2026-10-09: a new launch starts with an empty box; the old message is discarded, not restored
+            try:
+                self.store.save_draft({"text": ""})
+            except Exception:
+                pass
+            log(f"previous session's unsent message discarded ({len(d['text'])} chars); the box starts empty")
+            d = None
         if d and not self.text.get("1.0", "end-1c"):
             t = d["text"]
             self._last_copied = t              # never re-copy it at start: the clipboard may hold newer things
@@ -1790,6 +1805,16 @@ class App:
         self._update_status()
         log("loading model (cold start)")
         threading.Thread(target=self._engine_thread, args=(gen, 0, "gpu"), name="engine", daemon=True).start()
+
+    def _login_load(self):
+        """Login (2026-10-09): model straight onto the GPU at normal priority. Only while a game/batch job
+        holds the GPU does it fall back to the RAM pre-load (which moves on to the GPU when it is free)."""
+        if self.closing or self.engine not in ("unloaded", "error"):
+            return
+        if self.parked or self._held():
+            self.prewarm("login pre-warm (GPU busy)", then_gpu=True)
+        else:
+            self.load_model()
 
     def prewarm(self, reason="", then_gpu=False):
         """Load into CPU RAM only (0 VRAM), at low priority, so the first click only needs ~2 s.
