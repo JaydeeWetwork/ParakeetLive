@@ -1454,6 +1454,7 @@ class App:
             return
         if self.cor_left and copied == self._cor_dictated:
             self.cor_armed = True              # late dictation re-copied: you had already left with it
+            self._paste_kick()                 # recording: a Ctrl+V still stops it (2026-10-09)
             return
         self.cor_armed, self.cor_left = True, False
         # start from the window that was in front when the copy was requested (text arrived / edit /
@@ -1480,6 +1481,7 @@ class App:
                 log("clear-on-return: switched to another window after the text was copied")
                 self._draft_dirty()
                 self.dump_state()
+                self._paste_kick()             # recording: a Ctrl+V there still stops it (2026-10-09)
                 return
             self._cor_fg = h
         self._paste_kick()                     # (re)start the Ctrl+V watch once the widget is not in front
@@ -1488,8 +1490,11 @@ class App:
     # ---- same-window paste (log 57): Ctrl+V after the copy counts as "pasted", like switching away
     def _paste_watching(self):
         """Is there anything to watch? Copied text waiting, not left yet, both settings on, widget not in front."""
-        if (self.closing or not self.cor_armed or self.cor_left or not self.cfg["clear_on_return"]
-                or not self.cfg["paste_detect"]):
+        # 2026-10-09: while recording, keep looking after you switched away too (copy in the widget,
+        # click into the chat, Ctrl+V): that Ctrl+V means "stop" (_paste_stop). Still only while copied
+        # text is waiting; when not recording, leaving ends the watch as before.
+        if (self.closing or not self.cor_armed or (self.cor_left and not self.recording)
+                or not self.cfg["clear_on_return"] or not self.cfg["paste_detect"]):
             return False
         h, own = self._fg_info()
         return bool(h) and not own

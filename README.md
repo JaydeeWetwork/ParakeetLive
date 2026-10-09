@@ -206,6 +206,8 @@ else `%LOCALAPPDATA%\ParakeetLive`. It holds `logs\` (widget.log, server.log, st
   **Ctrl+V while recording stops the recording** (same as pressing stop): words still being
   transcribed stay in the box, and the pasted message is cleared from the box (Ctrl+Z or "Restore last
   message" brings it back). This uses the same Ctrl+V check, so no keys are read at any other time.
+  While recording, this also works after you switched to the other window (for example copy in the
+  widget, click into a chat box, Ctrl+V). A paste with the mouse (right-click > Paste) is not seen.
 
 ## Troubleshooting
 
