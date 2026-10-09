@@ -2794,12 +2794,14 @@ class App:
                 self.training.flush(5)
                 srv, port = self.server, self.port
                 keep = (not self._quit_stop_server and srv is not None and self.srv_rec is not None
-                        and self.engine in ("ready", "standby") and not self.holds
+                        and self.engine in ("ready", "standby") and not self.holds and self.parked is None
                         and self.srv_rec.load() is not None)
                 if keep:
                     self.stop_result = "kept"
                     log("quit: model server left running for the next widget run (it exits by itself after "
                         "90 s without one; tray 'Quit (stop model too)' stops it right away)")
+                    if self.engine == "ready":
+                        self._spawn_detach_guard()
                     if srv.logf:
                         try:
                             srv.logf.close()
@@ -2828,6 +2830,28 @@ class App:
                 self.tray.join(2)
                 self.root.destroy()
         wait_done()
+
+    def _spawn_detach_guard(self):
+        """detach-park (2026-10-09): while no widget is running, a short-lived hidden helper keeps auto-park
+        working for the kept server (same park list and policy; a game start = the server is stopped)."""
+        cmd = [sys.executable, os.path.abspath(__file__), "--detach-guard"]
+        if self.args.state_dir:
+            cmd += ["--state-dir", self.args.state_dir]
+        for g in (self.args.extra_park_game or []):
+            cmd += ["--extra-park-game", g]
+        try:
+            import subprocess
+            subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                             creationflags=0x08000000 | 0x00000200 | 0x00000008,   # no window, own group, detached
+                             close_fds=True)
+            log("quit: auto-park guard started for the kept server (until a widget is back or 95 s)")
+        except Exception as e:
+            log(f"quit: could not start the auto-park guard ({type(e).__name__}) - stopping the server instead")
+            try:
+                self.srv_rec.clear()
+                self.server.stop(core.Client(self.port, token=self.server_token))
+            except Exception:
+                pass
 
     def run(self):
         self.root.mainloop()
@@ -3097,6 +3121,80 @@ def batch_cmd(args):
             last_dump = time.perf_counter()
 
 
+WIDGET_MUTEX = "Local\\ParakeetLive.Widget"
+DETACH_GUARD_S = 95                            # the kept server exits by itself after 90 s without a widget
+
+
+def stop_detached_server(sd, why):
+    """Stop a model server a closed widget left running (keep-server). True if there was one to stop."""
+    if not sd:
+        return False
+    rec_store = core.ServerRecord(sd)
+    rec = rec_store.load()
+    if not rec:
+        return False
+    rec_store.clear()
+    core.Client(int(rec["port"]), token=rec["token"]).shutdown(timeout=2.0)
+    log(f"detached: {why} while no widget was running -> model server stopped (VRAM freed)")
+    return True
+
+
+def detach_guard(args, sampler=None, policy=None, widget_running=None, sleep=time.sleep, clock=time.monotonic):
+    """detach-park (2026-10-09): started hidden by a quitting widget that kept its model server on the GPU.
+    Until a widget is running again (it takes over) or the kept server has exited by itself (95 s), it samples
+    the GPU with the widget's own park policy and list; a park trigger (a game starting, ...) stops the server.
+    It never talks to the server otherwise (a /health ping would keep the unclaimed server alive). Reads no
+    keys, no mouse, no window contents; only process names and GPU counters, like the widget's watcher."""
+    sd = session_dir(args)
+    if not sd:
+        return 0
+    rec_store = core.ServerRecord(sd)
+    cfg = load_config()
+    cfg["park_games"] = list(cfg.get("park_games") or []) + list(args.extra_park_game or [])
+    if not cfg.get("auto_park", True):
+        return 0
+    own = None
+    if sampler is None:
+        import plive_gpu as gpu
+        try:
+            ad = gpu.find_adapter()
+            if not ad:
+                return 0
+            sampler = own = gpu.GpuSampler(ad)
+        except Exception as e:
+            log(f"detached guard: could not start ({type(e).__name__}); the server exits by itself within 90 s")
+            return 0
+        policy = gpu.ParkPolicy(cfg, own_pids=[os.getpid()])
+    if widget_running is None:
+        k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        k32.OpenMutexW.restype = wt.HANDLE
+
+        def widget_running():
+            h = k32.OpenMutexW(0x00100000, False, WIDGET_MUTEX)       # SYNCHRONIZE
+            if h:
+                k32.CloseHandle(h)
+            return bool(h)
+    t0 = clock()
+    log("detached guard: auto-park stays on while no widget is running")
+    try:
+        while clock() - t0 < DETACH_GUARD_S:
+            if widget_running():
+                log("detached guard: a widget is running again - it takes over")
+                return 0
+            if rec_store.load() is None:
+                return 0
+            d = policy.update(sampler.sample(), False, True)
+            if d and d[0] == "park":
+                stop_detached_server(sd, f"{d[1]} ({d[2]})")
+                return 1
+            sleep(max(1.0, float(cfg.get("park_poll_s") or 2)))
+    finally:
+        if own is not None:
+            own.close()
+    log("detached guard: done (no widget came back; the server exits by itself)")
+    return 0
+
+
 def build_parser():
     ap = argparse.ArgumentParser()
     ap.add_argument("--tray", action="store_true", help="start in the tray only; don't load the model")
@@ -3116,11 +3214,15 @@ def build_parser():
     ap.add_argument("--no-save", action="store_true", help="don't write config.json")
     ap.add_argument("--server-token", default=None, help=argparse.SUPPRESS)   # tests only: pin the server secret
     ap.add_argument("--state-dir", default=None, help=argparse.SUPPRESS)      # tests only: where the draft/retries live
+    ap.add_argument("--detach-guard", action="store_true", help=argparse.SUPPRESS)   # spawned by a quitting widget
+    ap.add_argument("--extra-park-game", action="append", default=[], help=argparse.SUPPRESS)  # tests only
     return ap
 
 
 def main():
     args = build_parser().parse_args()
+    if args.detach_guard:                              # before the widget mutex: it is not a widget
+        raise SystemExit(detach_guard(args))
     try:
         ctypes.windll.shcore.SetProcessDpiAwareness(1)
     except Exception:
@@ -3143,6 +3245,9 @@ def main():
                     break
                 time.sleep(0.25)
         return
+    if args.cmd == "batchhold" and stop_detached_server(session_dir(args), "batch GPU job"):
+        print("Parakeet Live: stopped the model server a closed widget had left running - the GPU is free")
+        raise SystemExit(0)
     if args.cmd in ("batchhold", "batchrelease"):
         print("Parakeet Live is not running - nothing to move off the GPU")
         raise SystemExit(3)
