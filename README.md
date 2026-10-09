@@ -203,6 +203,9 @@ else `%LOCALAPPDATA%\ParakeetLive`. It holds `logs\` (widget.log, server.log, st
 - To detect pasting, the widget checks just the Ctrl and V key states, and only while copied text is
   waiting and another window is in front. It installs no keyboard hook and records no keys.
   Turn it off with the gear menu option "Ctrl+V counts as pasting".
+  **Ctrl+V while recording stops the recording** (same as pressing stop): words still being
+  transcribed stay in the box, and the pasted message is cleared from the box (Ctrl+Z or "Restore last
+  message" brings it back). This uses the same Ctrl+V check, so no keys are read at any other time.
 
 ## Troubleshooting
 

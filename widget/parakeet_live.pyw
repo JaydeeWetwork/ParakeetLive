@@ -1513,6 +1513,9 @@ class App:
         if not self._paste_watching():
             return
         if self._ctrl_v():
+            if self.recording:
+                self._paste_stop()
+                return
             self.cor_left = True
             self._cor_left_session = self.rec_session
             log("clear-on-return: Ctrl+V after the text was copied (pasted in the same window)")
@@ -1520,6 +1523,52 @@ class App:
             self.dump_state()
             return
         self._paste_job = self.root.after(40, self._paste_watch)
+
+    def _paste_stop(self):
+        """Ctrl+V while recording (2026-10-09): you meant to stop and forgot. Same as pressing stop (what was
+        captured is still transcribed and stays in the box), and the pasted message leaves the box like a
+        clear-on-return clear (Ctrl+Z / 'Restore last message' brings it back). Nothing new is watched:
+        this rides on the Ctrl+V watch above, which only runs while copied text is waiting."""
+        log("paste detected while recording -> stopped")
+        pasted = self._copied_text or ""
+        box = self.text.get("1.0", "end-1c")
+        if pasted.strip() and box == pasted:
+            self._cor_clear("pasted while recording")
+        elif pasted.strip() and box.startswith(pasted):
+            self._cor_clear_prefix(pasted, "pasted while recording")   # text that came after the copy stays
+        self.cor_armed = self.cor_left = False   # that paste is used up; the tail gets copied on its own
+        self.stop_recording()
+        self.dump_state()
+
+    def _cor_clear_prefix(self, pasted, why):
+        """Like _cor_clear, but only the pasted start of the box goes; text that arrived after the copy
+        stays (restorable the same way, put back in front of it)."""
+        self.sync_training_spans()
+        box = self.text.get("1.0", "end-1c")
+        rest = box[len(pasted):]
+        n = len(pasted) + len(rest) - len(rest.lstrip())
+        gone = [s for s in self._span_offsets() if s[2] <= len(pasted)]
+        self.cor_restore = {"text": pasted, "spans": gone, "why": why, "t": time.strftime("%H:%M:%S")}
+        self.text.edit_separator()
+        for rid, *_ in gone:
+            for m in (f"us_{rid}", f"ue_{rid}"):
+                try:
+                    self.text.mark_unset(m)
+                except tk.TclError:
+                    pass
+            self.spans.pop(rid, None)
+        self.text.delete("1.0", f"1.0+{n}c")
+        self.text.edit_separator()
+        self._cor_prog_text = self.text.get("1.0", "end-1c")
+        self._cor_dictated = self._cor_prog_text
+        self._cor_clear_session = None
+        self._last_copied = None
+        self._update_placeholder()
+        log(f"clear-on-return: cleared {len(pasted)} pasted chars ({why}), kept {len(self._cor_prog_text)} "
+            "chars that came after the copy; Ctrl+Z or 'Restore last message' brings the cleared part back")
+        if self.cfg["autocopy"]:
+            self.copy_all()
+        self.dump_state()
 
     def _cor_should_clear(self):
         """Copied, then another window had the focus since, and the box was not edited after the copy.
